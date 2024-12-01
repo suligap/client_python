@@ -1,8 +1,30 @@
 import os
-from threading import Lock
+from threading import Lock, RLock
 import warnings
 
 from .mmap_dict import mmap_key, MmapedDict
+
+
+class _WarningRLock:
+    """A wrapper around threading.RLock that detects possible deadlocks.
+
+    Raises a RuntimeError when it detects attempts to re-enter the critical
+    section from a single thread.
+    """
+
+    def __init__(self):
+        self._rlock = RLock()
+        self._lock = Lock()
+
+    def __enter__(self):
+        self._rlock.acquire()
+        if not self._lock.acquire(blocking=False):
+            self._rlock.release()
+            raise RuntimeError('Attempt to enter a non reentrant context from a single thread.')
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._lock.release()
+        self._rlock.release()
 
 
 class MutexValue:
@@ -13,7 +35,7 @@ class MutexValue:
     def __init__(self, typ, metric_name, name, labelnames, labelvalues, help_text, **kwargs):
         self._value = 0.0
         self._exemplar = None
-        self._lock = Lock()
+        self._lock = _WarningRLock()
 
     def inc(self, amount):
         with self._lock:
@@ -47,10 +69,9 @@ def MultiProcessValue(process_identifier=os.getpid):
     files = {}
     values = []
     pid = {'value': process_identifier()}
-    # Use a single global lock when in multi-processing mode
-    # as we presume this means there is no threading going on.
+    # Use a single global lock when in multi-processing mode.
     # This avoids the need to also have mutexes in __MmapDict.
-    lock = Lock()
+    lock = _WarningRLock()
 
     class MmapedValue:
         """A float protected by a mutex backed by a per-process mmaped file."""
